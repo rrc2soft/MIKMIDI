@@ -143,6 +143,10 @@ NS_ASSUME_NONNULL_BEGIN
  */
 + (MIKArrayOf(MIKMIDICommand *) *)commandsWithMIDIPacket:(MIDIPacket *)packet;
 
++ (BOOL)onlyOneSingleCommandInPacket:(MIDIPacket *)inputPacket;
+
++ (MIKMIDICommand *)extractSingleCommandWithMIDIPacket:(MIDIPacket *)inputPacket;
+
 
 /**
  *  Convenience method for creating a new MIKMIDICommand. For command types for which there is a
@@ -235,5 +239,21 @@ NS_ASSUME_NONNULL_BEGIN
  *  @return YES if creating the packet list was successful, NO if an error occurred.
  */
 BOOL MIKCreateMIDIPacketListFromCommands(MIDIPacketList * _Nonnull * _Nonnull outPacketList, MIKArrayOf(MIKMIDICommand *) *commands);
+
+/**
+ *  Allocates and returns (by reference) a CoreMIDI MIDIPacketList created from a single MIKMIDICommand instance.
+ *  The created MIDIPacketList will be sized according to the command and its contents. Ownership is
+ *  transfered to the caller which becomes responsible for freeing the allocated memory.
+ *  Used by MIKMIDI when sending commands. Typically, this is not needed by clients of MIKMIDI.
+ *
+ *  @param outPacketList   A pointer to a pointer to a MIDIPacketList structure which will point to the created MIDIPacketList
+ *                         upon success.
+ *  @param commands        One MIKMIDICommand instance.
+ *
+ *  @return YES if creating the packet list was successful, NO if an error occurred.
+ */
+BOOL MIKCreateMIDIPacketListFromCommand(MIDIPacketList * _Nonnull * _Nonnull outPacketList, MIKMIDICommand *command);
+
+
 
 NS_ASSUME_NONNULL_END

@@ -27,9 +27,10 @@ const MusicTimeStamp MIKMIDISequenceLongestTrackLength = -1;
 
 @interface MIKMIDISequence ()
 {
-	MIKMIDISequencer *_sequencer;
+	//MIKMIDISequencer *_sequencer;
 }
 
+@property (nonatomic, weak) MIKMIDISequencer *sequencer; // RRC2Soft -> We had a memory leak here!
 @property (nonatomic) MusicSequence musicSequence;
 @property (nonatomic, strong) MIKMIDITrack *tempoTrack;
 @property (nonatomic, strong) NSMutableArray *internalTracks;
@@ -317,7 +318,12 @@ static void MIKSequenceCallback(void *inClientData, MusicSequence inSequence, Mu
 	__block Float64 tempo = 0;
 	
 	[self dispatchSyncToSequencerProcessingQueueAsNeeded:^{
-		NSArray *events = [self.tempoTrack eventsOfClass:[MIKMIDITempoEvent class] fromTimeStamp:0 toTimeStamp:timeStamp];
+        NSArray *events;
+        if (timeStamp < 0) {
+            events = [self.tempoTrack eventsOfClass:[MIKMIDITempoEvent class] fromTimeStamp:0 toTimeStamp:0];
+        } else {
+            events = [self.tempoTrack eventsOfClass:[MIKMIDITempoEvent class] fromTimeStamp:0 toTimeStamp:timeStamp];
+        }
 		tempo = [[events lastObject] bpm];
 	}];
 	
@@ -355,7 +361,14 @@ static void MIKSequenceCallback(void *inClientData, MusicSequence inSequence, Mu
 - (MIKMIDITimeSignature)timeSignatureAtTimeStamp:(MusicTimeStamp)timeStamp
 {
 	MIKMIDITimeSignature result = {4, 4};
-	NSArray *events = [self.tempoTrack eventsOfClass:[MIKMIDIMetaTimeSignatureEvent class] fromTimeStamp:0 toTimeStamp:timeStamp];
+    NSArray *events;
+    if (timeStamp < 0) {
+        events = [self.tempoTrack eventsOfClass:[MIKMIDIMetaTimeSignatureEvent class] fromTimeStamp:0 toTimeStamp:0];
+    } else {
+        events = [self.tempoTrack eventsOfClass:[MIKMIDIMetaTimeSignatureEvent class] fromTimeStamp:0 toTimeStamp:timeStamp];
+    }
+
+    
 	MIKMIDIMetaTimeSignatureEvent *event = [events lastObject];
 	if (event) {
 		result.numerator = event.numerator;

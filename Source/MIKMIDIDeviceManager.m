@@ -48,9 +48,6 @@ static MIKMIDIDeviceManager *sharedDeviceManager;
 - (void)addInternalVirtualDestinationsObject:(MIKMIDIDestinationEndpoint *)destination;
 - (void)removeInternalVirtualDestinationsObject:(MIKMIDIDestinationEndpoint *)destination;
 
-@property (nonatomic, strong) MIKMIDIInputPort *inputPort;
-@property (nonatomic, strong) MIKMIDIOutputPort *outputPort;
-
 @end
 
 @implementation MIKMIDIDeviceManager

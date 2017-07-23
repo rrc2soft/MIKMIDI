@@ -255,6 +255,11 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (nullable MIKMIDISynthesizer *)builtinSynthesizerForTrack:(MIKMIDITrack *)track;
 
+- (void) forceTempoOverride: (Float64) tempo inBeat: (MusicTimeStamp) beat atTime: (uint64_t) mach;
+- (void) forceTempoGlobal: (Float64) tempo inBeat: (MusicTimeStamp) beat atTimeLocal: (uint64_t) machLocal;
+
+- (BOOL) isInPreRoll;
+
 #pragma mark - Properties
 
 /**
@@ -302,6 +307,16 @@ NS_ASSUME_NONNULL_BEGIN
  *  @note This property is *not* observable using Key Value Observing.
  */
 @property (nonatomic) MusicTimeStamp currentTimeStamp;
+
+
+/**
+ *  RRC2SOFT
+ *  The last playback position in the sequence where we checked the MIDI notes
+ *  This property is here to test something.
+ *
+ *  @note This property is *not* observable using Key Value Observing.
+ */
+@property (nonatomic) MusicTimeStamp lastPlaybackTimeStamp;
 
 
 /**
@@ -422,6 +437,10 @@ NS_ASSUME_NONNULL_BEGIN
  *	if your sequencer needs to playback on iOS while the device is locked.
  */
 @property (nonatomic) NSTimeInterval maximumLookAheadInterval;
+
+@property (assign, nonatomic) double phaseToWait;
+
+@property (assign, nonatomic) BOOL playNotesOutsideLoop;
 
 #pragma mark - Deprecated
 

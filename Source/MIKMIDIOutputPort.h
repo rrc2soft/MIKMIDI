@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)sendCommands:(MIKArrayOf(MIKMIDICommand *) *)commands toDestination:(MIKMIDIDestinationEndpoint *)destination error:(NSError **)error;
 
+- (BOOL)sendCommand:(MIKMIDICommand *)command toDestination:(MIKMIDIDestinationEndpoint *)destination error:(NSError **)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

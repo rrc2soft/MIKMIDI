@@ -263,7 +263,7 @@
 
 - (MIKMIDIClientDestinationEndpoint *)metronomeEndpoint
 {
-	if (!_metronomeEndpoint) _metronomeEndpoint = [[MIKMIDIClientDestinationEndpoint alloc] initWithName:@"MIKMIDIClickTrackEndpoint" receivedMessagesHandler:NULL];
+	if (!_metronomeEndpoint) _metronomeEndpoint = [[MIKMIDIClientDestinationEndpoint alloc] initWithName:@"MIKMIDIClickTrackEndpoint" receivedMessagesHandler:NULL receivedSingleMessageHandler:NULL];
 	return _metronomeEndpoint;
 }
 

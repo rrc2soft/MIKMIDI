@@ -7,6 +7,7 @@
 //  Changes by Rodrigo "RRC2Soft" Roman
 //
 
+
 #import "MIKMIDISequencer.h"
 #import <mach/mach_time.h>
 #import "MIKMIDISequence.h"
@@ -25,7 +26,9 @@
 #import "MIKMIDISequencer+MIKMIDIPrivate.h"
 #import "MIKMIDISequence+MIKMIDIPrivate.h"
 #import "MIKMIDICommandScheduler.h"
+#import "MIKMIDIClientDestinationEndpoint.h"
 #import "MIKMIDIDestinationEndpoint.h"
+#import "MIKMIDIOutputPort.h"
 
 
 #if !__has_feature(objc_arc)
@@ -80,6 +83,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
 @property (nonatomic) MIDITimeStamp latestScheduledMIDITimeStamp;
 
 @property (nonatomic, strong) NSMutableDictionary *pendingNoteOffs;
+@property (atomic, strong) NSMutableArray *pendingNoteOffsWithinCycle;
 
 @property (nonatomic, strong) NSMutableDictionary *pendingRecordedNoteEvents;
 
@@ -90,11 +94,13 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
 @property (nonatomic, strong) NSMapTable *tracksToDefaultSynthsMap;
 
 @property (nonatomic) BOOL needsCurrentTempoUpdate;
+@property (nonatomic) BOOL needsOverrideTempoUpdate;
 
 @property (readonly, nonatomic) MusicTimeStamp sequenceLength;
 
 @property (nonatomic) dispatch_queue_t processingQueue;
 @property (nonatomic) dispatch_source_t processingTimer;
+@property (atomic, assign) BOOL processingFakeLock; // HACK & BAD, but this is not a nuclear power plant :-P
 
 @end
 
@@ -110,7 +116,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         _clock = [MIKMIDIClock clock];
         _syncedClock = [_clock syncedClock];
         _loopEndTimeStamp = MIKMIDISequencerEndOfSequenceLoopEndTimeStamp;
-        _preRoll = 4;
+        _preRoll = 0;
         _clickTrackStatus = MIKMIDISequencerClickTrackStatusEnabledInRecord;
         _tracksToDestinationsMap = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory valueOptions:NSPointerFunctionsStrongMemory];
         _tracksToDefaultSynthsMap = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory valueOptions:NSPointerFunctionsStrongMemory];
@@ -118,6 +124,8 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         _processingQueueKey = &_processingQueueKey;
         _processingQueueContext = &_processingQueueContext;
         _maximumLookAheadInterval = 0.1;
+        _phaseToWait = 0.;
+        _playNotesOutsideLoop = YES;
     }
     return self;
 }
@@ -168,15 +176,17 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
 
 - (void)startPlaybackAtTimeStamp:(MusicTimeStamp)timeStamp MIDITimeStamp:(MIDITimeStamp)midiTimeStamp adjustForPreRollWhenRecording:(BOOL)adjustForPreRoll
 {
-    if (self.isPlaying) [self stop];
-    if (adjustForPreRoll && self.isRecording) timeStamp -= self.preRoll;
+    //if (self.isPlaying) [self stop];
+    if (adjustForPreRoll /*&& self.isRecording*/) timeStamp -= self.preRoll;
     
     NSString *queueLabel = [[[NSBundle mainBundle] bundleIdentifier] stringByAppendingFormat:@".%@.%p", [self class], self];
     dispatch_queue_attr_t attr = DISPATCH_QUEUE_SERIAL;
     
 #if defined (__MAC_10_10) || defined (__IPHONE_8_0)
     if (&dispatch_queue_attr_make_with_qos_class != NULL) {
-        attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, DISPATCH_QUEUE_PRIORITY_HIGH);
+        // See https://github.com/mixedinkey-opensource/MIKMIDI/issues/204
+        //attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, DISPATCH_QUEUE_PRIORITY_HIGH);
+        attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
     }
 #endif
     
@@ -187,6 +197,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     dispatch_sync(queue, ^{
         self.startingTimeStamp = timeStamp;
         self.initialStartingTimeStamp = timeStamp;
+        _lastPlaybackTimeStamp = timeStamp; // RRC2Soft
         
         Float64 startingTempo = [self.sequence tempoAtTimeStamp:timeStamp];
         if (!startingTempo) startingTempo = kDefaultTempo;
@@ -197,6 +208,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     
     dispatch_sync(queue, ^{
         self.pendingNoteOffs = [NSMutableDictionary dictionary];
+        self.pendingNoteOffsWithinCycle = [[NSMutableArray alloc] init];
         self.latestScheduledMIDITimeStamp = midiTimeStamp;
         dispatch_source_t timer;
 #if defined (__MAC_10_10) || defined (__IPHONE_8_0)
@@ -206,10 +218,11 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
 #endif
         if (!timer) return NSLog(@"Unable to create processing timer for %@.", [self class]);
         self.processingTimer = timer;
+        self.processingFakeLock = NO;
         
         dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.05 * NSEC_PER_SEC, 0.05 * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{
-            [self processSequenceStartingFromMIDITimeStampRRC2SOFT:self.latestScheduledMIDITimeStamp];
+            [self processSequenceStartingFromMIDITimeStampRRC2SOFT:self.latestScheduledMIDITimeStamp keepLock:NO];
         });
         
         dispatch_resume(timer);
@@ -271,8 +284,11 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         
         MusicTimeStamp stopMusicTimeStamp = [clock musicTimeStampForMIDITimeStamp:stopTimeStamp];
         _currentTimeStamp = (stopMusicTimeStamp <= self.sequenceLength) ? stopMusicTimeStamp : self.sequenceLength;
+        _lastPlaybackTimeStamp = _currentTimeStamp; // RRC2Soft
         
         [clock unsyncMusicTimeStampsAndTemposFromMIDITimeStamps];
+        
+        [self.pendingNoteOffsWithinCycle removeAllObjects];
     };
     
     dispatchToProcessingQueue ? dispatch_sync(self.processingQueue, stopPlayback) : stopPlayback();
@@ -532,7 +548,12 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     }
     
     if (command) {
-        [self scheduleCommands:@[command] withCommandScheduler:destination];
+        NSError *error;
+        // RRC2SOFT - Optimization - This function gets called a lot!
+        [[MIKMIDIDeviceManager sharedDeviceManager].outputPort sendCommand:command
+                                                             toDestination:destination
+                                                                     error:&error];
+//        [self scheduleCommands:@[command] withCommandScheduler:destination];
     }
 }
 
@@ -560,11 +581,20 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     return result;
 }
 
-- (void)processSequenceStartingFromMIDITimeStampRRC2SOFT:(MIDITimeStamp)fromMIDITimeStamp
+- (void)processSequenceStartingFromMIDITimeStampRRC2SOFT:(MIDITimeStamp)fromMIDITimeStamp keepLock: (BOOL) keepLock
 {
+    // LOCK
+    if (!keepLock) { _processingFakeLock = YES; }
+    
+    // RRC2SOFT - Empty
+    [self.pendingNoteOffsWithinCycle removeAllObjects];
+    
     // Obtain relevant MusicTimeStamp AND MIDITimeStamp values
     MIDITimeStamp toMIDITimeStamp = MIKMIDIGetCurrentTimeStamp() + MIKMIDIClockMIDITimeStampsPerTimeInterval(self.maximumLookAheadInterval);
-    if (toMIDITimeStamp < fromMIDITimeStamp) return;
+    if (toMIDITimeStamp < fromMIDITimeStamp) {
+        if (!keepLock) { _processingFakeLock = NO; }
+        return;
+    }
     MIKMIDIClock *clock = self.clock;
     
     // RRC2SOFT
@@ -589,9 +619,12 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     BOOL isLooping = (self.shouldLoop && calculatedToMusicTimeStamp > loopStartTimeStamp && loopEndTimeStamp > loopStartTimeStamp);
     if (isLooping != self.isLooping) self.looping = isLooping;
     MusicTimeStamp maxToMusicTimeStamp = self.isRecording ? DBL_MAX : self.sequenceLength; // If recording, don't limit max timestamp (Issue #45)
-    maxToMusicTimeStamp = isLooping ? loopEndTimeStamp : maxToMusicTimeStamp;
+    // "RRC2Soft": If LoopEndTimeStamp is set, end it at that point
+    //maxToMusicTimeStamp = isLooping ? loopEndTimeStamp : maxToMusicTimeStamp;
+    maxToMusicTimeStamp = (loopEndTimeStamp > 0.) ? loopEndTimeStamp : maxToMusicTimeStamp;
     MusicTimeStamp toMusicTimeStamp = MIN(calculatedToMusicTimeStamp, maxToMusicTimeStamp);
     MIDITimeStamp actualToMIDITimeStamp = [clock midiTimeStampForMusicTimeStamp:toMusicTimeStamp];
+    _lastPlaybackTimeStamp = fromMusicTimeStamp; // RRC2SOFT - capture this value
     
     // Initialize THE list that will be used to schedule all the events
     NSMutableDictionary *allEventsByTimeStamp = [NSMutableDictionary dictionary];
@@ -600,8 +633,8 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     NSMutableDictionary *tempoEventsByTimeStamp = [NSMutableDictionary dictionary];
     Float64 overrideTempo = self.tempo;
     
-    if (!overrideTempo) {
-        NSArray *sequenceTempoEvents = [sequence.tempoTrack eventsOfClass:[MIKMIDITempoEvent class] fromTimeStamp:MAX(fromMusicTimeStamp, 0) toTimeStamp:toMusicTimeStamp];
+    if ((!overrideTempo) || (self.needsCurrentTempoUpdate)) {
+        NSArray *sequenceTempoEvents = [sequence.tempoTrack eventsOfClass:[MIKMIDITempoEvent class] fromTimeStamp:MAX(fromMusicTimeStamp, 0) toTimeStamp:MAX(toMusicTimeStamp, 0)];
         for (MIKMIDITempoEvent *tempoEvent in sequenceTempoEvents) {
             NSNumber *timeStampKey = @(tempoEvent.timeStamp);
             allEventsByTimeStamp[timeStampKey] = [NSMutableArray arrayWithObject:tempoEvent];
@@ -609,9 +642,10 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         }
     }
     
-    if (self.needsCurrentTempoUpdate) {
+    if ((self.needsCurrentTempoUpdate) || (self.needsOverrideTempoUpdate)) {
         if (!tempoEventsByTimeStamp.count) {
-            if (!overrideTempo) overrideTempo = [sequence tempoAtTimeStamp:fromMusicTimeStamp];
+            if ((!overrideTempo) || (self.needsCurrentTempoUpdate))
+                overrideTempo = [sequence tempoAtTimeStamp:fromMusicTimeStamp]; // Get the tempo from the track
             if (!overrideTempo) overrideTempo = kDefaultTempo;
             
             MIKMIDITempoEvent *tempoEvent = [MIKMIDITempoEvent tempoEventWithTimeStamp:fromMusicTimeStamp tempo:overrideTempo];
@@ -619,7 +653,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
             allEventsByTimeStamp[timeStampKey] = [NSMutableArray arrayWithObject:tempoEvent];
             tempoEventsByTimeStamp[timeStampKey] = tempoEvent;
         }
-        self.needsCurrentTempoUpdate = NO;
+        self.needsOverrideTempoUpdate = NO;
     }
     
     // Get all other events
@@ -650,7 +684,13 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         
         id<MIKMIDICommandScheduler> destination = events.count ? [self commandSchedulerForTrack:track] : nil;	// only get the destination if there's events so we don't create a destination endpoint if not needed
         for (MIKMIDIEvent *event in events) {
-            if ([event isKindOfClass:[MIKMIDINoteEvent class]] && [(MIKMIDINoteEvent *)event duration] <= 0) continue;
+            if ([event isKindOfClass:[MIKMIDINoteEvent class]]) {
+                if ([(MIKMIDINoteEvent *)event duration] <= 0) continue;
+            }
+            // RRC2SOFT: If we are not looping BUT loopEndTimeStamp is active, do not schedule notes after it
+            if (loopEndTimeStamp > 0.) {
+                if ([event timeStamp] >= loopEndTimeStamp) continue;
+            }
             NSNumber *timeStampKey = @(event.timeStamp);
             NSMutableArray *eventsAtTimeStamp = allEventsByTimeStamp[timeStampKey] ? allEventsByTimeStamp[timeStampKey] : [NSMutableArray array];
             MIKMIDIEventWithDestination *eventDestination = [MIKMIDIEventWithDestination
@@ -663,11 +703,15 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     }
     
     // Now, Get the pending note off events. We will retrieve only the note off events that are useful in this cycle
+    // RRC2SOFT: We will also copy them to the pending array
     NSMutableDictionary *pendingNoteOffs = self.pendingNoteOffs;
     for (NSNumber *timeStampKey in [pendingNoteOffs copy]) {
         MusicTimeStamp pendingNoteOffsMusicTimeStamp = timeStampKey.doubleValue;
         if (pendingNoteOffsMusicTimeStamp < fromMusicTimeStamp) continue;
         if (pendingNoteOffsMusicTimeStamp > toMusicTimeStamp) continue;
+        
+        [self.pendingNoteOffsWithinCycle addObject:pendingNoteOffs[timeStampKey]];
+        
         if (isLooping && (pendingNoteOffsMusicTimeStamp == loopEndTimeStamp)) continue;	// These pending note offs will be handled right before we loop
         
         NSMutableArray *eventsAtTimeStamp = allEventsByTimeStamp[timeStampKey] ? allEventsByTimeStamp[timeStampKey] : [NSMutableArray array];
@@ -690,6 +734,10 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
         if (isLooping && (musicTimeStamp < loopStartTimeStamp || musicTimeStamp >= loopEndTimeStamp)) continue;
         MIDITimeStamp midiTimeStamp = [clock midiTimeStampForMusicTimeStamp:musicTimeStamp];
         if (midiTimeStamp < MIKMIDIGetCurrentTimeStamp() && midiTimeStamp > fromMIDITimeStamp) continue;	// prevents events that were just recorded from being scheduled
+        if (self.preRoll && !isLooping && !self.playNotesOutsideLoop) {
+            if (musicTimeStamp < loopStartTimeStamp) continue; // Avoid playing notes on preroll
+        }
+        
         
         MIKMIDITempoEvent *tempoEventAtTimeStamp = tempoEventsByTimeStamp[timeStampKey];
         if (tempoEventAtTimeStamp) [self updateClockWithMusicTimeStamp:musicTimeStamp tempo:tempoEventAtTimeStamp.bpm atMIDITimeStamp:midiTimeStamp];
@@ -724,9 +772,12 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     
     // Handle looping or stopping at the end of the sequence
     if (isLooping) {
+        //MIDITimeStamp systemTimeStamp = MIKMIDIGetCurrentTimeStamp();
+        //MIDITimeStamp actualLoopEndTimeStamp = [clock midiTimeStampForMusicTimeStamp:toMusicTimeStamp];
         if (calculatedToMusicTimeStamp > toMusicTimeStamp) {
+        //if (systemTimeStamp >= actualLoopEndTimeStamp) {
             [self recordAllPendingNoteEventsWithOffTimeStamp:loopEndTimeStamp];
-            Float64 tempo = [sequence tempoAtTimeStamp:loopStartTimeStamp];
+            Float64 tempo = overrideTempo ? _tempo : [sequence tempoAtTimeStamp:loopStartTimeStamp];
             if (!tempo) tempo = kDefaultTempo;
             MusicTimeStamp loopLength = loopEndTimeStamp - loopStartTimeStamp;
             
@@ -734,16 +785,27 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
             [self sendAllPendingNoteOffsWithMIDITimeStamp:loopStartMIDITimeStamp];
             [self updateClockWithMusicTimeStamp:loopStartTimeStamp tempo:tempo atMIDITimeStamp:loopStartMIDITimeStamp];
             
+            // Iterate
             self.startingTimeStamp = loopStartTimeStamp;
             [[NSNotificationCenter defaultCenter] postNotificationName:MIKMIDISequencerWillLoopNotification object:self userInfo:nil];
-            [self processSequenceStartingFromMIDITimeStampRRC2SOFT:loopStartMIDITimeStamp];
+            [self processSequenceStartingFromMIDITimeStampRRC2SOFT:loopStartMIDITimeStamp keepLock:YES];
         }
     } else if (!self.isRecording) { // Don't stop automatically during recording
         MIDITimeStamp systemTimeStamp = MIKMIDIGetCurrentTimeStamp();
-        if ((systemTimeStamp > actualToMIDITimeStamp) && ([clock musicTimeStampForMIDITimeStamp:systemTimeStamp] >= self.sequenceLength)) {
-            [self stopWithDispatchToProcessingQueue:NO];
+        if ((systemTimeStamp > actualToMIDITimeStamp) && ([clock musicTimeStampForMIDITimeStamp:systemTimeStamp] >= loopEndTimeStamp)) { // loopEndTimeStamp equals sequence.length is there are no loops (RRC2SOFT)
+            [self stopWithDispatchToProcessingQueue:NO]; // already call record/send all pending note offs
         }
     }
+
+    // CLEANUP
+    if (self.needsCurrentTempoUpdate) {
+        // We already passed the first iteration. No need to use this fake forced tempo again.
+        _tempo = 0.;
+        self.needsCurrentTempoUpdate = NO;
+    }
+    
+    // UNLOCK
+    if (!keepLock) { _processingFakeLock = NO; }
 }
 
 
@@ -883,6 +945,193 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     return [self.tracksToDefaultSynthsMap objectForKey:track];
 }
 
+- (void) internal_forceTempo: (Float64) tempo inBeat: (MusicTimeStamp) beat atTime: (uint64_t) mach {
+    //>>HELPERS
+    MusicTimeStamp oldEndBeatTimeStamp = [_clock musicTimeStampForMIDITimeStamp:self.latestScheduledMIDITimeStamp];
+    
+    if (_playing) {
+        //>>CLEANUP
+        // Cancel the actual dispatch of processSequenceStartingFromMIDITimeStampRRC2SOFT. Will wait until the timer finishes, it is was running
+        self.processingTimer = NULL;
+        while (_processingFakeLock) {} // Wait for the lock to be relinquished
+        
+        // Clean the "pendingNoteOffs" array of this cycle
+        // = The notes up to latestScheduledMIDITimeStamp will be turned off using _pendingNoteOffsWithinCycle.
+        //   Therefore, there is no need to keep them within _pendingNoteOffs.
+        NSArray *timeStamps = [_pendingNoteOffs.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for (NSNumber *timeStampKey in timeStamps) {
+            MusicTimeStamp musicTimeStamp = timeStampKey.doubleValue;
+            if (musicTimeStamp < oldEndBeatTimeStamp) {
+                [_pendingNoteOffs removeObjectForKey:timeStampKey];
+            } else {
+                // We arrived where we wanted - finish
+                break;
+            }
+        }
+        
+        // Cancel also other structures
+        [_pendingRecordedNoteEvents removeAllObjects];
+
+        // Cleans the notes in the MIDI queue (those notes follow the previous BPM, and are invalid)
+        //for (MIKMIDITrack *track in _sequence.tracks) {
+        //    MIKMIDIDestinationEndpoint *dest = (MIKMIDIDestinationEndpoint *) [self commandSchedulerForTrack:track];
+        //    MIDIFlushOutput(dest.objectRef);
+        //}
+        MIDIFlushOutput(0); // TEST
+        
+        // Send a note OFF message to all pending note offs in this cycle (..latestScheduledMIDITimeStamp)
+        // These are all the notes that should have been turned off by processingTimer. We will turn them off NOW.
+        NSArray *iterationArray = [_pendingNoteOffsWithinCycle copy]; // Capture current atomic context
+        for (MIKMIDIPendingNoteOffsForTimeStamp *pendingNoteOffs in iterationArray) {
+            for (MIKMIDIEventWithDestination *noteOffEventWithDestination in pendingNoteOffs.noteEventsWithEndTimeStamp) {
+                // Create Command
+                MIKMIDINoteEvent *event = (MIKMIDINoteEvent *)noteOffEventWithDestination.event;
+                MIKMIDIClientDestinationEndpoint *destination = (MIKMIDIClientDestinationEndpoint *) noteOffEventWithDestination.destination;
+                MIKMIDICommand *noteOffCommand = [MIKMIDICommand noteOffCommandFromNoteEvent:event clock:_clock];
+                
+                // Send the command directly to the destination
+                destination.receivedSingleMessagesHandler(destination, noteOffCommand);
+            }
+            
+            // Remove the pending note
+            [_pendingNoteOffsWithinCycle removeObject:pendingNoteOffs];
+        }
+    }
+    
+    //>>REPAIR
+    if (_playing) {
+        if (_needsCurrentTempoUpdate) {
+            // Delete the tempo override, but continue with the clock change process
+            _tempo = 0;
+            self.needsCurrentTempoUpdate = NO;
+        } else {
+            // Overrides the tempo directly, so the sequencer callback will not manage it inside the timer loop
+            _tempo = tempo;
+        }
+        
+        // Corrects the beatStamp
+        MusicTimeStamp beatTimeStamp = [_clock musicTimeStampForMIDITimeStamp:mach];
+        
+        // Updates the clock AND the tempo
+        [self updateClockWithMusicTimeStamp:beatTimeStamp tempo:tempo atMIDITimeStamp:mach];
+    } else {
+        if (_needsCurrentTempoUpdate) {
+            // Overrides the tempo in the official way, which will update the tempo when starting to play
+            // But we will update it only once
+            self.tempo = tempo;
+        } else {
+            // Overrides the tempo in the official way, which will update the tempo when starting to play
+            self.tempo = tempo;
+        }
+    }
+    
+    if (_playing) {
+        //>>RECONSTRUCTION
+        // Relaunches the timer
+        dispatch_sync(self.processingQueue, ^{
+            self.pendingNoteOffsWithinCycle = [[NSMutableArray alloc] init];
+            self.latestScheduledMIDITimeStamp = mach_absolute_time(); // We want to continue NOW
+            
+            //--
+            //MusicTimeStamp newBeatTimeStamp = [_clock musicTimeStampForMIDITimeStamp:_latestScheduledMIDITimeStamp];
+            //NSLog(@"BEATJUMP(%f)%f-%f", newBeatTimeStamp - oldEndBeatTimeStamp, oldEndBeatTimeStamp, newBeatTimeStamp);
+            //NSLog(@"TIMEJUMP(%llu)%llu-%llu", mach - _latestScheduledMIDITimeStamp, _latestScheduledMIDITimeStamp, mach);
+            //--
+            
+            dispatch_source_t timer;
+#if defined (__MAC_10_10) || defined (__IPHONE_8_0)
+            timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, _processingQueue); // RRC2SOFT: Tell iOS to respect this timer
+#else
+            timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _processingQueue);
+#endif
+            if (!timer) return NSLog(@"Unable to create processing timer for %@.", [self class]);
+            self.processingTimer = timer;
+            self.processingFakeLock = NO;
+            
+            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.05 * NSEC_PER_SEC, 0.05 * NSEC_PER_SEC);
+            self.latestScheduledMIDITimeStamp = mach_absolute_time(); // We want to continue NOW
+            dispatch_source_set_event_handler(timer, ^{
+                [self processSequenceStartingFromMIDITimeStampRRC2SOFT:_latestScheduledMIDITimeStamp keepLock:NO];
+            });
+            
+            dispatch_resume(timer);
+        });
+    }
+}
+
+- (void) forceTempoGlobal: (Float64) tempo inBeat: (MusicTimeStamp) beat atTimeLocal: (uint64_t) machLocal
+{
+    // Specific
+    self.needsCurrentTempoUpdate = YES;
+    
+    // Internal (same as forced, but the needsCurrentTempoUpdate will reset the tempo value to 0)
+    [self internal_forceTempo:tempo inBeat:beat atTime:machLocal];
+}
+
+- (void)forceTempoOverride: (Float64) tempo inBeat: (MusicTimeStamp) beat atTime: (uint64_t) mach {
+    // Specific
+    self.needsCurrentTempoUpdate = NO;
+
+    // Internal
+    [self internal_forceTempo:tempo inBeat:beat atTime:mach];
+}
+
+- (BOOL) isInPreRoll
+{
+    return _currentTimeStamp < _loopStartTimeStamp;
+}
+
+/*
+- (void)forceTempoChange: (Float64) tempo;// inBeat: (MusicTimeStamp) beat atTimeLocal: (uint64_t) machLocal
+{
+    //>>CLEANUP
+    // Cancel the actual dispatch of processSequenceStartingFromMIDITimeStampRRC2SOFT
+    self.processingTimer = NULL;
+    
+    // Cleans the notes in the MIDI queue
+    [self.pendingRecordedNoteEvents removeAllObjects];
+    [self.pendingNoteOffs removeAllObjects];
+    self.pendingNoteOffs = nil;
+    for (MIKMIDITrack *track in _sequence.tracks) {
+        MIKMIDIDestinationEndpoint *dest = (MIKMIDIDestinationEndpoint *) [self commandSchedulerForTrack:track];
+        MIDIFlushOutput(dest.objectRef);
+    }
+
+    //>>UPDATE TIME
+    // Adjust time
+    uint64_t midiTimeStamp = mach_absolute_time();
+    MusicTimeStamp beatTimeStamp = [_clock musicTimeStampForMIDITimeStamp:midiTimeStamp];
+    NSLog(@"MIDI CHANGE: %llu, %f", midiTimeStamp, beatTimeStamp);
+    
+    //>>UPDATE TEMPO
+    _tempo = tempo;
+    [self updateClockWithMusicTimeStamp:beatTimeStamp tempo:tempo atMIDITimeStamp:midiTimeStamp];
+    
+    //>>RECONSTRUCTION
+    // Relaunches the timer
+    dispatch_sync(self.processingQueue, ^{
+        self.pendingNoteOffs = [NSMutableDictionary dictionary];
+        self.latestScheduledMIDITimeStamp = midiTimeStamp;
+        dispatch_source_t timer;
+#if defined (__MAC_10_10) || defined (__IPHONE_8_0)
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, self.processingQueue); // RRC2SOFT: Tell iOS to respect this timer
+#else
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.processingQueue);
+#endif
+        if (!timer) return NSLog(@"Unable to create processing timer for %@.", [self class]);
+        self.processingTimer = timer;
+        
+        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 0.05 * NSEC_PER_SEC, 0.05 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{
+            [self processSequenceStartingFromMIDITimeStampRRC2SOFT:self.latestScheduledMIDITimeStamp];
+        });
+        
+        dispatch_resume(timer);
+    });
+
+}
+*/
+ 
 #pragma mark - Click Track
 
 - (NSMutableArray *)clickTrackEventsFromTimeStamp:(MusicTimeStamp)fromTimeStamp toTimeStamp:(MusicTimeStamp)toTimeStamp
@@ -948,10 +1197,10 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
 
 #pragma mark - Timer
 
-- (void)processingTimerFired:(NSTimer *)timer
-{
-    [self processSequenceStartingFromMIDITimeStampRRC2SOFT:self.latestScheduledMIDITimeStamp + 1];
-}
+//- (void)processingTimerFired:(NSTimer *)timer
+//{
+//    [self processSequenceStartingFromMIDITimeStampRRC2SOFT:self.latestScheduledMIDITimeStamp + 1];
+//}
 
 #pragma mark - KVO
 
@@ -1040,7 +1289,7 @@ const MusicTimeStamp MIKMIDISequencerEndOfSequenceLoopEndTimeStamp = -1;
     if (tempo < 0) tempo = 0;
     if (_tempo != tempo) {
         _tempo = tempo;
-        if (self.isPlaying) self.needsCurrentTempoUpdate = YES;
+        if (self.isPlaying) self.needsOverrideTempoUpdate = YES;
     }
 }
 

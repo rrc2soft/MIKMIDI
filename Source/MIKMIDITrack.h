@@ -211,6 +211,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, getter = isSolo) BOOL solo;
 
 /**
+ *  RRC2SOFT: Avoid reconstructing the cache
+ *
+ *  If ON, the event cache will not be reconstructed. For optimization only. Use at your own risk.
+ *
+ */
+@property (nonatomic, assign) BOOL rrc2_doNotReconstructCache;
+
+-(void) rrc2_reconstructEventsCache;
+
+
+/**
  *  The length of the MIDI track.
  *
  *  This property can be observed using Key Value Observing. 

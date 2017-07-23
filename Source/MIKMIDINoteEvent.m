@@ -196,7 +196,8 @@
 	noteOn.channel = noteEvent.channel;
 	noteOn.note = noteEvent.note;
 	noteOn.velocity = noteEvent.velocity;
-	return [noteOn copy];
+	//return [noteOn copy];
+    return noteOn; // RRC2SOFT - OPTIMIZATION - Give me the mutable one! Do not create, nil, and then waste time!
 }
 
 + (MIKMIDINoteOffCommand *)noteOffCommandFromNoteEvent:(MIKMIDINoteEvent *)noteEvent clock:(MIKMIDIClock *)clock
@@ -207,7 +208,8 @@
 	noteOff.channel = noteEvent.channel;
 	noteOff.note = noteEvent.note;
 	noteOff.velocity = noteEvent.releaseVelocity;
-	return [noteOff copy];
+	//return [noteOff copy];
+    return noteOff; // RRC2SOFT - OPTIMIZATION - Give me the mutable one! Do not create, nil, and then waste time!
 }
 
 @end

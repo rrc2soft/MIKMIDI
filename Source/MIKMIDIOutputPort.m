@@ -51,4 +51,23 @@
 	return YES;
 }
 
+- (BOOL)sendCommand:(MIKMIDICommand *)command toDestination:(MIKMIDIDestinationEndpoint *)destination error:(NSError **)error
+{
+    if (!destination) return NO;
+    
+    error = error ? error : &(NSError *__autoreleasing){ nil };
+    
+    MIDIPacketList *packetList;
+    if (!MIKCreateMIDIPacketListFromCommand(&packetList, command)) return NO;
+    
+    OSStatus err = MIDISend(self.portRef, destination.objectRef, packetList);
+    free(packetList);
+    if (err != noErr) {
+        *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:err userInfo:nil];
+        return NO;
+    }
+    
+    return YES;
+}
+
 @end

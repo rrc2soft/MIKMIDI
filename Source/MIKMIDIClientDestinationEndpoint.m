@@ -39,7 +39,7 @@
 	return client;
 }
 
-- (instancetype)initWithName:(NSString *)name receivedMessagesHandler:(MIKMIDIClientDestinationEndpointEventHandler)handler;
+- (nullable instancetype)initWithName:(NSString *)name receivedMessagesHandler:(nullable MIKMIDIClientDestinationEndpointEventHandler)handler receivedSingleMessageHandler:(nullable MIKMIDIClientDestinationEndpointSingleEventHandler)singleHandler
 {
 	__unsafe_unretained id *trampoline = (__unsafe_unretained id *)malloc(sizeof(id));
 	
@@ -67,6 +67,7 @@
 		_selfTrampoline = trampoline;
 		
 		_receivedMessagesHandler = handler;
+        _receivedSingleMessagesHandler = singleHandler;
 	}
 	return self;
 }
@@ -87,17 +88,33 @@ void MIKMIDIDestinationReadProc(const MIDIPacketList *pktList, void *readProcRef
 		
 		NSMutableArray *receivedCommands = [NSMutableArray array];
 		MIDIPacket *packet = (MIDIPacket *)pktList->packet;
-		for (int i=0; i<pktList->numPackets; i++) {
-            if (packet->length > 0) {
-                NSArray *commands = [MIKMIDICommand commandsWithMIDIPacket:packet];
-                if (commands) [receivedCommands addObjectsFromArray:commands];
+        
+        // !!!: RRC2SOFT: Optimization
+        BOOL singleSent = NO;
+        if (pktList->numPackets == 1) {
+            MIKMIDICommand *command;
+            if ([MIKMIDICommand onlyOneSingleCommandInPacket:packet]) {
+                command = [MIKMIDICommand extractSingleCommandWithMIDIPacket:packet];
+                if (command) {
+                    self.receivedSingleMessagesHandler(self, command);
+                    singleSent = YES;
+                }
             }
-			packet = MIDIPacketNext(packet);
-		}
-		
-		if ([receivedCommands count] && self.receivedMessagesHandler) {
-			self.receivedMessagesHandler(self, receivedCommands);
-		}
+        }
+        
+        if (!singleSent) {
+            for (int i=0; i<pktList->numPackets; i++) {
+                if (packet->length > 0) {
+                    NSArray *commands = [MIKMIDICommand commandsWithMIDIPacket:packet];
+                    if (commands) [receivedCommands addObjectsFromArray:commands];
+                }
+                packet = MIDIPacketNext(packet);
+            }
+            
+            if ([receivedCommands count] && self.receivedMessagesHandler) {
+                self.receivedMessagesHandler(self, receivedCommands);
+            }
+        }
 	}
 }
 

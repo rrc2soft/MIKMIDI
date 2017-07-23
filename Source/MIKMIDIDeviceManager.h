@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #import "MIKMIDIInputPort.h"
+#import "MIKMIDIOutputPort.h"
 #import "MIKMIDICompilerCompatibility.h"
 
 @class MIKMIDIDevice;
@@ -185,6 +186,16 @@ extern NSString * const MIKMIDIEndpointKey;
  *  An NSArray of MIKMIDISourceEndpoint instances that are connected to at least one event handler.
  */
 @property (nonatomic, readonly) MIKArrayOf(MIKMIDISourceEndpoint *) *connectedInputSources;
+
+/**
+ *  Internal Input port.
+ */
+@property (nonatomic, strong) MIKMIDIInputPort *inputPort;
+
+/**
+ *  Internal Output port.
+ */
+@property (nonatomic, strong) MIKMIDIOutputPort *outputPort;
 
 @end
 

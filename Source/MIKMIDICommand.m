@@ -49,6 +49,68 @@ static NSMutableSet *registeredMIKMIDICommandSubclasses;
 	return [[subclass alloc] initWithMIDIPacket:packet];
 }
 
++ (BOOL)onlyOneSingleCommandInPacket:(MIDIPacket *)inputPacket
+{
+    NSInteger firstCommandType = inputPacket->data[0];
+    NSInteger standardLength = MIKMIDIStandardLengthOfMessageForCommandType(firstCommandType);
+    if (standardLength <= 0 || inputPacket->length == standardLength) {
+        return YES;
+    }
+    const Byte *packetData = inputPacket->data;
+    if (packetData[0] != firstCommandType && ((packetData[0] | 0x0F) != (firstCommandType | 0x0F))) {
+        return YES;
+    }
+    return NO;
+}
+
++ (MIKMIDICommand *)extractSingleCommandWithMIDIPacket:(MIDIPacket *)inputPacket
+{
+    MIKMIDICommand *command = nil;
+    NSInteger firstCommandType = inputPacket->data[0];
+    NSInteger standardLength = MIKMIDIStandardLengthOfMessageForCommandType(firstCommandType);
+    if (standardLength <= 0 || inputPacket->length == standardLength) {
+        // Can't parse multiple message because we don't know the length of each one,
+        // or there's only one message there
+        command = [MIKMIDICommand commandWithMIDIPacket:inputPacket];
+        return command;
+    }
+    
+    NSInteger packetCount = 0;
+    while (1) {
+        BOOL checkInSecondIteration = NO;
+        NSInteger dataOffset = packetCount * standardLength;
+        if (checkInSecondIteration) {
+            if (dataOffset > (inputPacket->length - standardLength)) {
+                return command; // This is the command we needed
+            } else {
+                assert(NO); // Hi! Sorry, but you can use this method only if there is one single command
+            }
+        }
+        const Byte *packetData = inputPacket->data + dataOffset;
+        if (packetData[0] != firstCommandType && ((packetData[0] | 0x0F) != (firstCommandType | 0x0F))) {
+            // Doesn't look like multiple messages because they're not all the same type
+            command = [MIKMIDICommand commandWithMIDIPacket:inputPacket];
+            return command;
+        }
+        
+        // This is gross, but it's the only way I can find to reliably create a
+        // single-message MIDIPacket.
+        MIDIPacketList packetList;
+        MIDIPacket *midiPacket = MIDIPacketListInit(&packetList);
+        midiPacket = MIDIPacketListAdd(&packetList,
+                                       sizeof(MIDIPacketList),
+                                       midiPacket,
+                                       inputPacket->timeStamp,
+                                       standardLength,
+                                       packetData);
+        command = [MIKMIDICommand commandWithMIDIPacket:midiPacket];
+        checkInSecondIteration = YES;
+        packetCount++;
+    }
+    
+    return nil;
+}
+
 + (NSArray *)commandsWithMIDIPacket:(MIDIPacket *)inputPacket
 {
 	NSInteger firstCommandType = inputPacket->data[0];
@@ -374,4 +436,52 @@ BOOL MIKCreateMIDIPacketListFromCommands(MIDIPacketList **outPacketList, NSArray
 
 	*outPacketList = packetList;
 	return YES;
+}
+
+ByteCount MIKMIDIPacketListSizeForCommand(MIKMIDICommand *command)
+{
+    if (command == nil) {
+        return 0;
+    }
+    
+    // Compute the size of static members of MIDIPacketList and (MIDIPacket * [commands count])
+    ByteCount packetListSize = offsetof(MIDIPacketList, packet) + offsetof(MIDIPacket, data) * 1;
+    
+    // Compute the total number of MIDI bytes in all commands
+    packetListSize += [[command data] length];
+    
+    return packetListSize;
+}
+
+BOOL MIKCreateMIDIPacketListFromCommand(MIDIPacketList **outPacketList, MIKMIDICommand *command)
+{
+    if (outPacketList == NULL || command == nil) {
+        return NO;
+    }
+    
+    ByteCount listSize = MIKMIDIPacketListSizeForCommand(command);
+    
+    if (listSize == 0) {
+        return NO;
+    }
+    
+    MIDIPacketList *packetList = calloc(1, listSize);
+    if (packetList == NULL) {
+        return NO;
+    }
+    
+    MIDIPacket *currentPacket = MIDIPacketListInit(packetList);
+    currentPacket = MIDIPacketListAdd(packetList,
+                                      listSize,
+                                      currentPacket,
+                                      command.midiTimestamp,
+                                      [command.data length],
+                                      [command.data bytes]);
+    if (!currentPacket) {
+        free(packetList);
+        return NO;
+    }
+    
+    *outPacketList = packetList;
+    return YES;
 }

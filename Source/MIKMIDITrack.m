@@ -53,6 +53,7 @@
 		_internalEvents = [[NSMutableSet alloc] init];
         _musicTrack = musicTrack;
         _sequence = sequence;
+        _rrc2_doNotReconstructCache = NO;
 		[self reloadAllEventsFromMusicTrack];
     }
 
@@ -532,8 +533,8 @@
 
 	[self dispatchSyncToSequencerProcessingQueueAsNeeded:^{
 		if (!self.sortedEventsCache) {
-			NSSortDescriptor *sortDescriptor = [NSSortDescriptor sortDescriptorWithKey:@"timeStamp" ascending:YES];
-			_sortedEventsCache = [self.internalEvents sortedArrayUsingDescriptors:@[sortDescriptor]];
+            NSSortDescriptor *sortDescriptor = [NSSortDescriptor sortDescriptorWithKey:@"timeStamp" ascending:YES];
+            _sortedEventsCache = [self.internalEvents sortedArrayUsingDescriptors:@[sortDescriptor]];
 		}
 		events = self.sortedEventsCache;
 	}];
@@ -569,7 +570,13 @@
 - (void)addInternalEventsObject:(MIKMIDIEvent *)event
 {
 	[self.internalEvents addObject:[event copy]];
-	self.sortedEventsCache = nil;
+    if (!_rrc2_doNotReconstructCache)
+        self.sortedEventsCache = nil;
+}
+
+-(void) rrc2_reconstructEventsCache
+{
+    self.sortedEventsCache = nil;
 }
 
 - (void)addInternalEvents:(NSSet *)events
@@ -709,7 +716,7 @@
 	if (_length == -1) {
 		MusicTimeStamp lastStamp = 0;
 
-		for (MIKMIDIEvent *event in self.events) {
+		for (MIKMIDIEvent *event in self.internalEvents) { // RRC2Soft: Avoid event reconstruction when adding notes in sequence
 			MusicTimeStamp endStamp = [event respondsToSelector:@selector(endTimeStamp)] ? [(MIKMIDINoteEvent *)event endTimeStamp] : event.timeStamp;
 			if (endStamp > lastStamp) lastStamp = endStamp;
 		}

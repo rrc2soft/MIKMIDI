@@ -72,7 +72,9 @@
 
 #if defined (__MAC_10_10) || defined (__IPHONE_8_0)
 			if (&dispatch_queue_attr_make_with_qos_class != NULL) {
-				attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, DISPATCH_QUEUE_PRIORITY_HIGH);
+                // See https://github.com/mixedinkey-opensource/MIKMIDI/issues/204
+				//attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, DISPATCH_QUEUE_PRIORITY_HIGH);
+                attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
 			}
 #endif
 
@@ -364,16 +366,18 @@ Float64 MIKMIDIClockSecondsPerMIDITimeStamp()
 	dispatch_once(&onceToken, ^{
 		mach_timebase_info_data_t timeBaseInfoData;
 		mach_timebase_info(&timeBaseInfoData);
-		secondsPerMIDITimeStamp = (timeBaseInfoData.numer / timeBaseInfoData.denom) / 1.0e9;
+		secondsPerMIDITimeStamp = ((Float64)timeBaseInfoData.numer / timeBaseInfoData.denom) / 1.0e9;
 	});
 	return secondsPerMIDITimeStamp;
-
 }
 
 Float64 MIKMIDIClockMIDITimeStampsPerTimeInterval(NSTimeInterval timeInterval)
 {
-	static Float64 midiTimeStampsPerSecond = 0;
-	if (!midiTimeStampsPerSecond) midiTimeStampsPerSecond = (1.0 / MIKMIDIClockSecondsPerMIDITimeStamp());
+    Float64 midiTimeStampsPerSecond = 0;
+    if (!midiTimeStampsPerSecond) {
+        Float64 clockSecondsPerMIDITimeStamp = MIKMIDIClockSecondsPerMIDITimeStamp();
+        midiTimeStampsPerSecond = (1.0 / clockSecondsPerMIDITimeStamp);
+    }
 	return midiTimeStampsPerSecond * timeInterval;
 }
 
